@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>創作部 材料管理システム - DOテスト</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: Canvas; color: CanvasText; }
+    main { width: min(1100px, calc(100% - 24px)); margin: 24px auto 48px; }
+    h1 { margin: 0 0 6px; font-size: clamp(22px, 5vw, 32px); }
+    .subtitle { margin: 0 0 20px; opacity: .7; }
+    .panel { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 14px; padding: 16px; margin-bottom: 16px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+    label { display: grid; gap: 5px; font-size: 13px; font-weight: 600; }
+    input, button { font: inherit; }
+    input { width: 100%; padding: 9px 10px; border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 9px; background: Canvas; color: CanvasText; }
+    button { border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 9px; padding: 9px 13px; cursor: pointer; background: ButtonFace; color: ButtonText; }
+    button:hover { filter: brightness(.96); }
+    .field { flex: 1 1 180px; min-width: 140px; }
+    .status { margin-top: 10px; min-height: 1.4em; font-size: 14px; }
+    .ok { color: #087f23; }
+    .error { color: #b00020; }
+    .materials { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .card { border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 12px; padding: 14px; }
+    .card h2 { margin: 0 0 12px; font-size: 18px; overflow-wrap: anywhere; }
+    .stats { display: grid; gap: 8px; }
+    .stat { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, CanvasText 7%, transparent); }
+    .add { margin-top: 12px; display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .raw { width: 100%; min-height: 160px; resize: vertical; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .hint { font-size: 13px; opacity: .7; margin: 8px 0 0; }
+    @media (max-width: 800px) { .materials { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 520px) { .materials { grid-template-columns: 1fr; } main { width: min(100% - 16px, 1100px); margin-top: 12px; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>創作部 材料管理システム</h1>
+  <p class="subtitle">Durable Objects + SQLite テスト用フロントエンド</p>
+
+  <section class="panel">
+    <div class="row">
+      <label class="field">Worker URL
+        <input id="apiBase" value="https://sousakubu-origami-r8-1-do.YOUR_SUBDOMAIN.workers.dev" placeholder="https://...workers.dev">
+      </label>
+      <button id="loadBtn">一覧を取得</button>
+      <button id="saveBtn">PUTで保存</button>
+    </div>
+    <p class="hint">Cloudflareで新しいWorkerの実際のURLに変更してから「一覧を取得」を押してください。</p>
+    <div id="status" class="status"></div>
+  </section>
+
+  <section class="panel">
+    <h2>材料を追加</h2>
+    <div class="row">
+      <label class="field">材料名<input id="newName" placeholder="例：折り紙（青）"></label>
+      <label class="field">必要数<input id="newRequired" type="number" min="0" step="1" value="10"></label>
+      <label class="field">準備済み<input id="newPrepared" type="number" min="0" step="1" value="0"></label>
+      <button id="addMaterialBtn">POSTで追加</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>材料一覧</h2>
+    <div id="materials" class="materials"></div>
+  </section>
+
+  <section class="panel">
+    <h2>APIレスポンス / 現在のJSON</h2>
+    <textarea id="raw" class="raw" readonly></textarea>
+  </section>
+</main>
+
+<script>
+  const apiBase = document.querySelector('#apiBase');
+  const statusEl = document.querySelector('#status');
+  const materialsEl = document.querySelector('#materials');
+  const rawEl = document.querySelector('#raw');
+  let materials = [];
+
+  const base = () => apiBase.value.trim().replace(/\/$/, '');
+
+  function status(message, type = '') {
+    statusEl.textContent = message;
+    statusEl.className = 'status ' + type;
+  }
+
+  function render() {
+    rawEl.value = JSON.stringify(materials, null, 2);
+    if (!materials.length) {
+      materialsEl.innerHTML = '<p>材料がありません。</p>';
+      return;
+    }
+
+    materialsEl.innerHTML = materials.map((m, index) => {
+      const remaining = Math.max(0, m.required - m.prepared);
+      return `
+        <article class="card">
+          <h2>${escapeHtml(m.name)}</h2>
+          <div class="stats">
+            <div class="stat"><span>必要数</span><strong>${m.required}</strong></div>
+            <div class="stat"><span>準備済み</span><strong>${m.prepared}</strong></div>
+            <div class="stat"><span>残り</span><strong>${remaining}</strong></div>
+          </div>
+          <div class="add">
+            <input id="amount-${index}" type="number" step="1" value="1" placeholder="追加数（減らす場合は-）">
+            <button data-index="${index}" class="addBtn">＋追加</button>
+          </div>
+        </article>`;
+    }).join('');
+
+    document.querySelectorAll('.addBtn').forEach(btn => {
+      btn.addEventListener('click', () => addPrepared(Number(btn.dataset.index)));
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>'"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' })[c]);
+  }
+
+  async function request(path, options = {}) {
+    const response = await fetch(base() + path, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+    });
+    const text = await response.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = text; }
+    if (!response.ok) throw new Error(typeof data === 'object' && data?.error ? data.error : `HTTP ${response.status}`);
+    return data;
+  }
+
+  async function load() {
+    try {
+      status('取得中…');
+      materials = await request('/api/materials');
+      render();
+      status(`取得成功：${materials.length}件`, 'ok');
+    } catch (e) {
+      status('取得失敗：' + e.message, 'error');
+    }
+  }
+
+  async function addPrepared(index) {
+    const amount = Number(document.querySelector('#amount-' + index).value);
+    const material = materials[index];
+    if (!Number.isInteger(amount) || amount === 0) {
+      status('追加数には0以外の整数を入力してください。', 'error');
+      return;
+    }
+    try {
+      status(`${material.name} を ${amount > 0 ? '+' : ''}${amount} しています…`);
+      materials = await request('/api/materials/add', {
+        method: 'POST',
+        body: JSON.stringify({ id: material.id, amount })
+      });
+      render();
+      status('準備数を更新しました。', 'ok');
+    } catch (e) {
+      status('準備数の更新失敗：' + e.message, 'error');
+    }
+  }
+
+  async function addMaterial() {
+    const name = document.querySelector('#newName').value.trim();
+    const required = Number(document.querySelector('#newRequired').value);
+    const prepared = Number(document.querySelector('#newPrepared').value);
+    if (!name || !Number.isInteger(required) || required < 0 || !Number.isInteger(prepared) || prepared < 0) {
+      status('材料名・必要数・準備済みを正しく入力してください。', 'error');
+      return;
+    }
+    try {
+      status('材料を追加中…');
+      const id = crypto.randomUUID();
+      materials = await request('/api/materials', {
+        method: 'POST',
+        body: JSON.stringify({ id, name, required, prepared })
+      });
+      render();
+      document.querySelector('#newName').value = '';
+      status('材料を追加しました。', 'ok');
+    } catch (e) {
+      status('材料の追加失敗：' + e.message, 'error');
+    }
+  }
+
+  async function save() {
+    try {
+      status('PUTで保存中…');
+      materials = await request('/api/materials', {
+        method: 'PUT',
+        body: JSON.stringify(materials)
+      });
+      render();
+      status('PUT保存成功。', 'ok');
+    } catch (e) {
+      status('PUT保存失敗：' + e.message, 'error');
+    }
+  }
+
+  document.querySelector('#loadBtn').addEventListener('click', load);
+  document.querySelector('#saveBtn').addEventListener('click', save);
+  document.querySelector('#addMaterialBtn').addEventListener('click', addMaterial);
+
+  render();
+</script>
+</body>
+</html>
