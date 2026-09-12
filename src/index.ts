@@ -1,71 +1,221 @@
 import { DurableObject } from "cloudflare:workers";
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
+type Material = {
+	id: string;
+	name: string;
+	required: number;
+	prepared: number;
+};
 
-/** A Durable Object's behavior is defined in an exported Javascript class */
-export class MyDurableObject extends DurableObject<Env> {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param ctx - The interface for interacting with Durable Object state
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 */
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
+const MAIN_DO_NAME = "main";
+
+function normalizeMaterial(input: unknown): Material {
+	if (!input || typeof input !== "object") {
+		throw new Error("材料データが不正です");
 	}
 
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @returns The greeting to be sent back to the Worker
-	 */
-	async sayHello(): Promise<string> {
-		let result = this.ctx.storage.sql
-			.exec("SELECT 'Hello, World!' as greeting")
-			.one() as { greeting: string };
-		return result.greeting;
+	const value = input as Record<string, unknown>;
+	const id = String(value.id ?? "").trim();
+	const name = String(value.name ?? "").trim();
+	const required = Number(value.required);
+	const prepared = Number(value.prepared ?? 0);
+
+	if (!id) throw new Error("idは必須です");
+	if (!name) throw new Error("nameは必須です");
+	if (!Number.isInteger(required) || required < 0) {
+		throw new Error("requiredは0以上の整数にしてください");
+	}
+	if (!Number.isInteger(prepared) || prepared < 0) {
+		throw new Error("preparedは0以上の整数にしてください");
+	}
+
+	return {
+		id,
+		name,
+		required,
+		prepared: Math.min(prepared, required),
+	};
+}
+
+/** Durable Object that stores the creative-club materials inventory in SQLite. */
+export class MyDurableObject extends DurableObject<Env> {
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+
+		this.ctx.storage.sql.exec(`
+			CREATE TABLE IF NOT EXISTS materials (
+				id TEXT PRIMARY KEY,
+				name TEXT NOT NULL,
+				required INTEGER NOT NULL DEFAULT 0,
+				prepared INTEGER NOT NULL DEFAULT 0,
+				sort_order INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)
+		`);
+	}
+
+	getMaterials(): Material[] {
+		return this.ctx.storage.sql
+			.exec(
+				`SELECT id, name, required, prepared
+				 FROM materials
+				 ORDER BY sort_order ASC, created_at ASC`,
+			)
+			.toArray() as Material[];
+	}
+
+	replaceMaterials(input: unknown[]): void {
+		const materials = input.map(normalizeMaterial);
+		const now = Date.now();
+
+		this.ctx.storage.sql.exec("BEGIN");
+		try {
+			this.ctx.storage.sql.exec("DELETE FROM materials");
+
+			for (let i = 0; i < materials.length; i++) {
+				const material = materials[i];
+				this.ctx.storage.sql.exec(
+					`INSERT INTO materials
+					 (id, name, required, prepared, sort_order, created_at, updated_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+					material.id,
+					material.name,
+					material.required,
+					material.prepared,
+					i,
+					now,
+					now,
+				);
+			}
+
+			this.ctx.storage.sql.exec("COMMIT");
+		} catch (error) {
+			this.ctx.storage.sql.exec("ROLLBACK");
+			throw error;
+		}
+	}
+
+	addMaterial(input: unknown): Material[] {
+		const material = normalizeMaterial(input);
+		const now = Date.now();
+		const nextOrder = this.ctx.storage.sql
+			.exec("SELECT COALESCE(MAX(sort_order) + 1, 0) AS next_order FROM materials")
+			.one() as { next_order: number };
+
+		this.ctx.storage.sql.exec(
+			`INSERT INTO materials
+			 (id, name, required, prepared, sort_order, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			material.id,
+			material.name,
+			material.required,
+			material.prepared,
+			nextOrder.next_order,
+			now,
+			now,
+		);
+
+		return this.getMaterials();
+	}
+
+	addPrepared(id: string, amount: number): Material[] {
+		const materialId = String(id ?? "").trim();
+		if (!materialId) throw new Error("idは必須です");
+		if (!Number.isInteger(amount) || amount === 0) {
+			throw new Error("amountは0ではない整数にしてください");
+		}
+
+		const now = Date.now();
+
+		// This is a single SQLite UPDATE statement, so concurrent additions to
+		// the same material are serialized by the Durable Object's SQLite storage.
+		this.ctx.storage.sql.exec(
+			`UPDATE materials
+			 SET prepared = MAX(0, MIN(required, prepared + ?)),
+			     updated_at = ?
+			 WHERE id = ?`,
+			amount,
+			now,
+			materialId,
+		);
+
+		const result = this.ctx.storage.sql
+			.exec("SELECT id FROM materials WHERE id = ?", materialId)
+			.one() as { id?: string } | null;
+
+		if (!result?.id) throw new Error("指定された材料が見つかりません");
+
+		return this.getMaterials();
 	}
 }
 
-export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param request - The request submitted to the Worker from the client
-	 * @param env - The interface to reference bindings declared in wrangler.jsonc
-	 * @param ctx - The execution context of the Worker
-	 * @returns The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx): Promise<Response> {
-		// Create a `DurableObjectId` for an instance of the `MyDurableObject`
-		// class. The name of class is used to identify the Durable Object.
-		// Requests from all Workers to the instance named
-		// will go to a single globally unique Durable Object instance.
-		const id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName(
-			new URL(request.url).pathname,
-		);
+function jsonResponse(data: unknown, status = 200): Response {
+	return new Response(JSON.stringify(data), {
+		status,
+		headers: {
+			"Content-Type": "application/json; charset=UTF-8",
+			"Access-Control-Allow-Origin": "*",
+			"Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+			"Access-Control-Allow-Headers": "Content-Type",
+		},
+	});
+}
 
-		// Create a stub to open a communication channel with the Durable
-		// Object instance.
+function errorResponse(message: string, status = 400): Response {
+	return jsonResponse({ error: message }, status);
+}
+
+export default {
+	async fetch(request, env): Promise<Response> {
+		if (request.method === "OPTIONS") {
+			return new Response(null, {
+			status: 204,
+			headers: {
+				"Access-Control-Allow-Origin": "*",
+				"Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+				"Access-Control-Allow-Headers": "Content-Type",
+			},
+			});
+		}
+
+		const url = new URL(request.url);
+		if (!url.pathname.startsWith("/api/materials")) {
+			return new Response("創作部 材料管理システム API", {
+				headers: { "Access-Control-Allow-Origin": "*" },
+			});
+		}
+
+		const id = env.MY_DURABLE_OBJECT.idFromName(MAIN_DO_NAME);
 		const stub = env.MY_DURABLE_OBJECT.get(id);
 
-		// Call the `sayHello()` RPC method on the stub to invoke the method on
-		// the remote Durable Object instance
-		const greeting = await stub.sayHello();
+		try {
+			if (url.pathname === "/api/materials" && request.method === "GET") {
+				return jsonResponse(await stub.getMaterials());
+			}
 
-		return new Response(greeting);
+			if (url.pathname === "/api/materials" && request.method === "PUT") {
+				const body = await request.json();
+				if (!Array.isArray(body)) return errorResponse("配列データを送信してください");
+				await stub.replaceMaterials(body);
+				return jsonResponse(await stub.getMaterials());
+			}
+
+			if (url.pathname === "/api/materials" && request.method === "POST") {
+				const body = await request.json();
+				return jsonResponse(await stub.addMaterial(body), 201);
+			}
+
+			if (url.pathname === "/api/materials/add" && request.method === "POST") {
+				const body = (await request.json()) as { id?: unknown; amount?: unknown };
+				const amount = Number(body.amount);
+				return jsonResponse(await stub.addPrepared(String(body.id ?? ""), amount));
+			}
+
+			return errorResponse("Not Found", 404);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "サーバーエラーが発生しました";
+			return errorResponse(message, message.includes("見つかりません") ? 404 : 400);
+		}
 	},
 } satisfies ExportedHandler<Env>;
