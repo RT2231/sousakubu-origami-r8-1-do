@@ -10,38 +10,22 @@ type Material = {
 const MAIN_DO_NAME = "main";
 
 function normalizeMaterial(input: unknown): Material {
-	if (!input || typeof input !== "object") {
-		throw new Error("材料データが不正です");
-	}
-
+	if (!input || typeof input !== "object") throw new Error("材料データが不正です");
 	const value = input as Record<string, unknown>;
 	const id = String(value.id ?? "").trim();
 	const name = String(value.name ?? "").trim();
 	const required = Number(value.required);
 	const prepared = Number(value.prepared ?? 0);
-
 	if (!id) throw new Error("idは必須です");
 	if (!name) throw new Error("nameは必須です");
-	if (!Number.isInteger(required) || required < 0) {
-		throw new Error("requiredは0以上の整数にしてください");
-	}
-	if (!Number.isInteger(prepared) || prepared < 0) {
-		throw new Error("preparedは0以上の整数にしてください");
-	}
-
-	return {
-		id,
-		name,
-		required,
-		prepared: Math.min(prepared, required),
-	};
+	if (!Number.isInteger(required) || required < 0) throw new Error("requiredは0以上の整数にしてください");
+	if (!Number.isInteger(prepared) || prepared < 0) throw new Error("preparedは0以上の整数にしてください");
+	return { id, name, required, prepared: Math.min(prepared, required) };
 }
 
-/** Durable Object that stores the creative-club materials inventory in SQLite. */
 export class MyDurableObject extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
-
 		this.ctx.storage.sql.exec(`
 			CREATE TABLE IF NOT EXISTS materials (
 				id TEXT PRIMARY KEY,
@@ -57,11 +41,7 @@ export class MyDurableObject extends DurableObject<Env> {
 
 	getMaterials(): Material[] {
 		return this.ctx.storage.sql
-			.exec(
-				`SELECT id, name, required, prepared
-				 FROM materials
-				 ORDER BY sort_order ASC, created_at ASC`,
-			)
+			.exec(`SELECT id, name, required, prepared FROM materials ORDER BY sort_order ASC, created_at ASC`)
 			.toArray() as Material[];
 	}
 
@@ -69,10 +49,9 @@ export class MyDurableObject extends DurableObject<Env> {
 		const materials = input.map(normalizeMaterial);
 		const now = Date.now();
 
-		this.ctx.storage.sql.exec("BEGIN");
-		try {
+		// Durable ObjectsではSQLのBEGIN/COMMITではなく、transactionSync()を使う。
+		this.ctx.storage.transactionSync(() => {
 			this.ctx.storage.sql.exec("DELETE FROM materials");
-
 			for (let i = 0; i < materials.length; i++) {
 				const material = materials[i];
 				this.ctx.storage.sql.exec(
@@ -88,12 +67,7 @@ export class MyDurableObject extends DurableObject<Env> {
 					now,
 				);
 			}
-
-			this.ctx.storage.sql.exec("COMMIT");
-		} catch (error) {
-			this.ctx.storage.sql.exec("ROLLBACK");
-			throw error;
-		}
+		});
 	}
 
 	addMaterial(input: unknown): Material[] {
@@ -107,45 +81,26 @@ export class MyDurableObject extends DurableObject<Env> {
 			`INSERT INTO materials
 			 (id, name, required, prepared, sort_order, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			material.id,
-			material.name,
-			material.required,
-			material.prepared,
-			nextOrder.next_order,
-			now,
-			now,
+			material.id, material.name, material.required, material.prepared,
+			nextOrder.next_order, now, now,
 		);
-
 		return this.getMaterials();
 	}
 
 	addPrepared(id: string, amount: number): Material[] {
 		const materialId = String(id ?? "").trim();
 		if (!materialId) throw new Error("idは必須です");
-		if (!Number.isInteger(amount) || amount === 0) {
-			throw new Error("amountは0ではない整数にしてください");
-		}
+		if (!Number.isInteger(amount) || amount === 0) throw new Error("amountは0ではない整数にしてください");
 
-		const now = Date.now();
-
-		// This is a single SQLite UPDATE statement, so concurrent additions to
-		// the same material are serialized by the Durable Object's SQLite storage.
 		this.ctx.storage.sql.exec(
 			`UPDATE materials
-			 SET prepared = MAX(0, MIN(required, prepared + ?)),
-			     updated_at = ?
+			 SET prepared = MAX(0, MIN(required, prepared + ?)), updated_at = ?
 			 WHERE id = ?`,
-			amount,
-			now,
-			materialId,
+			amount, Date.now(), materialId,
 		);
 
-		const result = this.ctx.storage.sql
-			.exec("SELECT id FROM materials WHERE id = ?", materialId)
-			.one() as { id?: string } | null;
-
+		const result = this.ctx.storage.sql.exec("SELECT id FROM materials WHERE id = ?", materialId).one() as { id?: string } | null;
 		if (!result?.id) throw new Error("指定された材料が見つかりません");
-
 		return this.getMaterials();
 	}
 }
@@ -169,21 +124,16 @@ function errorResponse(message: string, status = 400): Response {
 export default {
 	async fetch(request, env): Promise<Response> {
 		if (request.method === "OPTIONS") {
-			return new Response(null, {
-			status: 204,
-			headers: {
+			return new Response(null, { status: 204, headers: {
 				"Access-Control-Allow-Origin": "*",
 				"Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
 				"Access-Control-Allow-Headers": "Content-Type",
-			},
-			});
+			} });
 		}
 
 		const url = new URL(request.url);
 		if (!url.pathname.startsWith("/api/materials")) {
-			return new Response("創作部 材料管理システム API", {
-				headers: { "Access-Control-Allow-Origin": "*" },
-			});
+			return new Response("創作部 材料管理システム API", { headers: { "Access-Control-Allow-Origin": "*" } });
 		}
 
 		const id = env.MY_DURABLE_OBJECT.idFromName(MAIN_DO_NAME);
@@ -193,25 +143,19 @@ export default {
 			if (url.pathname === "/api/materials" && request.method === "GET") {
 				return jsonResponse(await stub.getMaterials());
 			}
-
 			if (url.pathname === "/api/materials" && request.method === "PUT") {
 				const body = await request.json();
 				if (!Array.isArray(body)) return errorResponse("配列データを送信してください");
 				await stub.replaceMaterials(body);
 				return jsonResponse(await stub.getMaterials());
 			}
-
 			if (url.pathname === "/api/materials" && request.method === "POST") {
-				const body = await request.json();
-				return jsonResponse(await stub.addMaterial(body), 201);
+				return jsonResponse(await stub.addMaterial(await request.json()), 201);
 			}
-
 			if (url.pathname === "/api/materials/add" && request.method === "POST") {
-				const body = (await request.json()) as { id?: unknown; amount?: unknown };
-				const amount = Number(body.amount);
-				return jsonResponse(await stub.addPrepared(String(body.id ?? ""), amount));
+				const body = await request.json() as { id?: unknown; amount?: unknown };
+				return jsonResponse(await stub.addPrepared(String(body.id ?? ""), Number(body.amount)));
 			}
-
 			return errorResponse("Not Found", 404);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "サーバーエラーが発生しました";
