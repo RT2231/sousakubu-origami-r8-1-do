@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="ja">
+ <head>
+   <meta charset="UTF-8" />
+   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+   <title>創作部 折り鶴あと何羽？システム</title>
+   <link rel="stylesheet" href="style.css" />
+ </head>
+ <body>
+   <div class="background"></div>
+   <header>
+     <div class="title-area">
+       <h1>📦 創作部 折り鶴あと何羽？システム</h1>
+     </div>
+     <div class="update-area">
+       <span id="lastUpdate">最終更新：---</span>
+       <span id="autoUpdateCountdown">次回自動更新まで：30秒</span>
+     </div>
+   </header>
+   <main>
+     <!-- 集計 -->
+     <section class="summary">
+       <div class="summary-card">
+         <span class="summary-title"> 必要数 </span>
+         <span id="totalRequired" class="summary-value"> 0 </span>
+       </div>
+       <div class="summary-card">
+         <span class="summary-title"> 準備済み </span>
+         <span id="totalPrepared" class="summary-value"> 0 </span>
+       </div>
+       <div class="summary-card">
+         <span class="summary-title"> 残り </span>
+         <span id="totalRemaining" class="summary-value"> 0 </span>
+       </div>
+     </section>
+     <!-- 全体進捗 -->
+     <section class="overall-card">
+       <div class="overall-top">
+         <span> 全体進捗 </span>
+         <span id="overallPercent"> 0% </span>
+       </div>
+       <div class="progress">
+         <div id="overallBar" class="progress-bar"></div>
+       </div>
+     </section>
+     <!-- ツールバー -->
+     <section class="toolbar">
+       <input id="search" type="text" placeholder="材料名で検索" />
+       <!--
+       <button id="addMaterial">➕ 材料追加</button>
+       -->
+       
+       <button id="refresh">🔄 更新</button>
+       <button id="save">💾 保存</button>
+     </section>
+     <!-- 材料一覧 -->
+     <section id="materials" class="materials"></section>
+   </main>
+   <!-- 材料カード -->
+   <template id="materialTemplate">
+     <div class="material-card">
+       <div class="card-header">
+         <input class="material-name" placeholder="材料名" />
+        <!-- <button class="delete" title="削除">🗑</button> -->
+         
+       </div>
+       <div class="input-grid">
+         <div class="field">
+           <label>必要数</label>
+           <input class="required" type="number" min="0" />
+         </div>
+         <div class="field">
+           <label>準備済み</label>
+           <input class="prepared" type="number" readonly />
+         </div>
+         <div class="add-area">
+           <input
+             class="add-count"
+             type="number"
+             placeholder="追加数（減らしたい場合は-）"
+           />
+           <button class="add-button">＋追加</button>
+         </div>
+         <div class="field">
+           <label>残り</label>
+           <input class="remaining" type="number" readonly />
+         </div>
+       </div>
+       <div class="progress-area">
+         <div class="progress">
+           <div class="progress-bar"></div>
+         </div>
+         <span class="percent"> 0% </span>
+       </div>
+     </div>
+   </template>
+   <!-- ローディング -->
+   <div id="loading">
+     <div class="loader"></div>
+     <p>同期中...</p>
+   </div>
+   <!-- Toast -->
+   <div id="toast"></div>
+   <footer>
+     <span id="connectionStatus"> 🔴 オフライン </span>
+   </footer>
+   <script src="script.js"></script>
+ </body>
+</html>
