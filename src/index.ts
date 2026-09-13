@@ -7,6 +7,8 @@ type Material = {
 	prepared: number;
 };
 
+type MaterialPatch = Partial<Material>;
+
 const MAIN_DO_NAME = "main";
 
 function normalizeMaterial(input: unknown): Material {
@@ -21,6 +23,31 @@ function normalizeMaterial(input: unknown): Material {
 	if (!Number.isInteger(required) || required < 0) throw new Error("requiredは0以上の整数にしてください");
 	if (!Number.isInteger(prepared) || prepared < 0) throw new Error("preparedは0以上の整数にしてください");
 	return { id, name, required, prepared: Math.min(prepared, required) };
+}
+
+function normalizePatch(input: unknown): MaterialPatch {
+	if (!input || typeof input !== "object") throw new Error("更新データが不正です");
+	const value = input as Record<string, unknown>;
+	const patch: MaterialPatch = {};
+
+	if ("name" in value) {
+		const name = String(value.name ?? "").trim();
+		if (!name) throw new Error("nameは必須です");
+		patch.name = name;
+	}
+	if ("required" in value) {
+		const required = Number(value.required);
+		if (!Number.isInteger(required) || required < 0) throw new Error("requiredは0以上の整数にしてください");
+		patch.required = required;
+	}
+	if ("prepared" in value) {
+		const prepared = Number(value.prepared);
+		if (!Number.isInteger(prepared) || prepared < 0) throw new Error("preparedは0以上の整数にしてください");
+		patch.prepared = prepared;
+	}
+
+	if (Object.keys(patch).length === 0) throw new Error("更新する項目がありません");
+	return patch;
 }
 
 export class MyDurableObject extends DurableObject<Env> {
@@ -87,6 +114,66 @@ export class MyDurableObject extends DurableObject<Env> {
 		return this.getMaterials();
 	}
 
+	updateMaterial(id: string, input: unknown): Material[] {
+		const materialId = String(id ?? "").trim();
+		if (!materialId) throw new Error("idは必須です");
+		const patch = normalizePatch(input);
+		const now = Date.now();
+
+		this.ctx.storage.transactionSync(() => {
+			const current = this.ctx.storage.sql
+				.exec("SELECT required, prepared FROM materials WHERE id = ?", materialId)
+				.one() as { required?: number; prepared?: number } | null;
+			if (!current || current.required === undefined || current.prepared === undefined) {
+				throw new Error("指定された材料が見つかりません");
+			}
+
+			const required = patch.required ?? current.required;
+			const prepared = Math.min(patch.prepared ?? current.prepared, required);
+			if (patch.name !== undefined && patch.required !== undefined && patch.prepared === undefined) {
+				this.ctx.storage.sql.exec(
+					"UPDATE materials SET name = ?, required = ?, prepared = ?, updated_at = ? WHERE id = ?",
+					patch.name, required, prepared, now, materialId,
+				);
+			} else if (patch.name !== undefined && patch.required === undefined && patch.prepared !== undefined) {
+				this.ctx.storage.sql.exec(
+					"UPDATE materials SET name = ?, prepared = ?, updated_at = ? WHERE id = ?",
+					patch.name, prepared, now, materialId,
+				);
+			} else if (patch.name !== undefined && patch.required === undefined && patch.prepared === undefined) {
+				this.ctx.storage.sql.exec(
+					"UPDATE materials SET name = ?, updated_at = ? WHERE id = ?",
+					patch.name, now, materialId,
+				);
+			} else if (patch.required !== undefined && patch.prepared !== undefined) {
+				this.ctx.storage.sql.exec(
+					"UPDATE materials SET required = ?, prepared = ?, updated_at = ? WHERE id = ?",
+					required, prepared, now, materialId,
+				);
+			} else if (patch.required !== undefined) {
+				this.ctx.storage.sql.exec(
+					"UPDATE materials SET required = ?, prepared = ?, updated_at = ? WHERE id = ?",
+					required, prepared, now, materialId,
+				);
+			} else if (patch.prepared !== undefined) {
+				this.ctx.storage.sql.exec(
+					"UPDATE materials SET prepared = ?, updated_at = ? WHERE id = ?",
+					prepared, now, materialId,
+				);
+			}
+		});
+
+		return this.getMaterials();
+	}
+
+	deleteMaterial(id: string): Material[] {
+		const materialId = String(id ?? "").trim();
+		if (!materialId) throw new Error("idは必須です");
+		const result = this.ctx.storage.sql.exec("DELETE FROM materials WHERE id = ?", materialId);
+		if (result.rowsWritten === 0) throw new Error("指定された材料が見つかりません");
+		return this.getMaterials();
+	}
+
 	addPrepared(id: string, amount: number): Material[] {
 		const materialId = String(id ?? "").trim();
 		if (!materialId) throw new Error("idは必須です");
@@ -111,7 +198,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 		headers: {
 			"Content-Type": "application/json; charset=UTF-8",
 			"Access-Control-Allow-Origin": "*",
-			"Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+			"Access-Control-Allow-Methods": "GET, PUT, POST, PATCH, DELETE, OPTIONS",
 			"Access-Control-Allow-Headers": "Content-Type",
 		},
 	});
@@ -126,7 +213,7 @@ export default {
 		if (request.method === "OPTIONS") {
 			return new Response(null, { status: 204, headers: {
 				"Access-Control-Allow-Origin": "*",
-				"Access-Control-Allow-Methods": "GET, PUT, POST, OPTIONS",
+				"Access-Control-Allow-Methods": "GET, PUT, POST, PATCH, DELETE, OPTIONS",
 				"Access-Control-Allow-Headers": "Content-Type",
 			} });
 		}
@@ -151,6 +238,16 @@ export default {
 			}
 			if (url.pathname === "/api/materials" && request.method === "POST") {
 				return jsonResponse(await stub.addMaterial(await request.json()), 201);
+			}
+			if (url.pathname.startsWith("/api/materials/") && request.method === "PATCH") {
+				const materialId = decodeURIComponent(url.pathname.slice("/api/materials/".length));
+				if (!materialId || materialId === "add") return errorResponse("材料IDが不正です");
+				return jsonResponse(await stub.updateMaterial(materialId, await request.json()));
+			}
+			if (url.pathname.startsWith("/api/materials/") && request.method === "DELETE") {
+				const materialId = decodeURIComponent(url.pathname.slice("/api/materials/".length));
+				if (!materialId || materialId === "add") return errorResponse("材料IDが不正です");
+				return jsonResponse(await stub.deleteMaterial(materialId));
 			}
 			if (url.pathname === "/api/materials/add" && request.method === "POST") {
 				const body = await request.json() as { id?: unknown; amount?: unknown };
